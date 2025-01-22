@@ -61,6 +61,7 @@ def add_ips_to_database(conn, cursor):
 
     except FileNotFoundError:
         print(f"Error: Blacklist file not found at {BLACKLIST_FILE}")
+        
     except psycopg2.Error as e:
         print(f"Database error: {e}")
         conn.rollback()
