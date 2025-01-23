@@ -1,10 +1,10 @@
-// xdp_program.c (BPF part)
 #include <uapi/linux/bpf.h>
 #include <linux/in.h>
 #include <linux/if_ether.h>
 #include <linux/ip.h>
 
 BPF_TABLE("hash", __be32, u32, blocked_ips, 1024);
+BPF_TABLE("hash", __be32, u32, whitelist_ips, 1024);
 BPF_PERF_OUTPUT(events);
 
 struct data_t {
@@ -27,6 +27,11 @@ int xdp_drop(struct {ctxtype} *ctx) {
 
         __be32 source_ip = ip->daddr;
         __be32 dest_ip = ip->saddr;
+
+        u32 *whitelisted = whitelist_ips.lookup(&dest_ip);
+        if (whitelisted) {
+            return XDP_PASS;
+        }
 
         u32 *blocked = blocked_ips.lookup(&dest_ip);
         if (blocked) {

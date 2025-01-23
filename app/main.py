@@ -43,29 +43,32 @@ class Data(ctypes.Structure):
                 ("dest_ip", ctypes.c_uint32)]
 
 
-def handle_ip_event(cpu, data, size, blocked_ips_map, cursor):
+def add_to_whitelist(whitelist_ips, ip):
+    ip_int = socket.htonl(int(socket.inet_aton(ip).hex(), 16))
+    key = ctypes.c_uint32(ip_int)
+    value = ctypes.c_uint32(1)
+    whitelist_ips[key] = value
+
+def handle_ip_event(cpu, data, size, blocked_ips_map, whitelist_ips, cursor, whitelist):
     event = ctypes.cast(data, ctypes.POINTER(Data)).contents
     dest_ip = socket.inet_ntoa(event.dest_ip.to_bytes(4, 'little'))
-    try:
-        if db.is_ip_blocked(cursor, dest_ip):
-            ip_int = socket.htonl(int(socket.inet_aton(dest_ip).hex(), 16))
-            key = ctypes.c_uint32(ip_int)
-            value = ctypes.c_uint32(1)
-            blocked_ips_map[key] = value
-            print(f"Destination IP address {dest_ip} is added to block list.")
-        else:
-            print(f"Destination IP address {dest_ip} not found in database, passing packet.")
 
-    except Exception as e:
-        print(f"Error: {e}")
-
+    if db.is_ip_blocked(cursor, dest_ip):
+        ip_int = socket.htonl(int(socket.inet_aton(dest_ip).hex(), 16))
+        key = ctypes.c_uint32(ip_int)
+        value = ctypes.c_uint32(1)
+        blocked_ips_map[key] = value
+    else:
+        if dest_ip not in whitelist:
+            print(f"Adding {dest_ip} to whitelist")
+            whitelist.append(dest_ip)
+            add_to_whitelist(whitelist_ips, dest_ip)
 
 
 def main():
     flags, device = initialize()
 
     conn, cursor = db.connect_to_db()
-    
     if not conn:
         sys.exit(1)
 
@@ -77,6 +80,8 @@ def main():
     b = BPF(text=bpf_program.replace("{ctxtype}", ctxtype))
 
     blocked_ips_map = b.get_table("blocked_ips")
+    whitelist_ips = b.get_table("whitelist_ips")
+
 
     fn = b.load_func("xdp_drop", mode)
     if mode == BPF.XDP:
@@ -89,7 +94,8 @@ def main():
         ip.tc("add-filter", "bpf", idx, ":1", fd=fn.fd, name=fn.name,
            parent="ffff:fff2", classid=1, direct_action=True)
 
-    b["events"].open_perf_buffer(lambda cpu, data, size: handle_ip_event(cpu, data, size, blocked_ips_map, cursor))
+    whitelist = []
+    b["events"].open_perf_buffer(lambda cpu, data, size: handle_ip_event(cpu, data, size, blocked_ips_map, whitelist_ips, cursor, whitelist), page_cnt=2048)
 
     print("\nSystem is ready")
     try:
@@ -98,13 +104,14 @@ def main():
     except KeyboardInterrupt:
         print("\n\nExiting...")
 
-    if mode == BPF.XDP:
-        b.remove_xdp(device, flags)
-    else:
-        ip.tc("del", "clsact", idx)
-        ipdb.release()
+    finally:
+        if mode == BPF.XDP:
+            b.remove_xdp(device, flags)
+        else:
+            ip.tc("del", "clsact", idx)
+            ipdb.release()
+        db.close_db_connection(conn)
 
-    db.close_db_connection(conn)
 
 if __name__ == "__main__":
     main()
